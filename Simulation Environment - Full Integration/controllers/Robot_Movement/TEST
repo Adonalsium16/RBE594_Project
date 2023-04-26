@@ -1,0 +1,183 @@
+"""Robot_Movement controller."""
+
+# You may need to import some classes of the controller module. Ex:
+#  from controller import Robot, Motor, DistanceSensor
+from controller import Robot
+import Dyanamics_and_Controls as dc
+import Global_Planner as gp
+import VisOdom_integration as VisOdom
+import numpy as np
+import Sensor_Fusion as sf
+import copy
+
+if __name__ == "__main__":
+
+    # create the Robot instance.
+    robot = Robot()
+    
+    # get the time step of the current world.
+    timestep = 32*3 #timestep in ms
+    max_speed = 6.28 #max speed in rads/s. (not needed for automation code)
+    
+    #Device initiation  
+    #Create Lidar instance
+    lidar = robot.getDevice('RPlidar A2')
+    lidar.enable(timestep)
+    
+    #Create camera instances
+    left_camera = robot.getDevice('MultiSense S21 left camera')
+    left_camera.enable(timestep)
+    left_ps = robot.getDevice('PS_1')
+    left_ps.enable(timestep)
+
+    right_camera = robot.getDevice('MultiSense S21 right camera')
+    right_camera.enable(timestep)
+    right_ps = robot.getDevice('PS_2')
+    right_ps.enable(timestep)
+
+    ps_values = [0, 0]
+
+    imu = robot.getDevice('MultiSense S21 inertial unit')
+    imu.enable(timestep)
+        
+    #Create LPS instance
+    gps = robot.getDevice('gps')
+    gps.enable(timestep)
+
+    #Create UltraSonic instance
+    #ultrasonic = robot.getDevice('UltraSonic')
+    #ultrasonic.enable(timestep)
+    #pointlight = robot.getDevice('PointLight')
+    
+    #Create gyro instance
+    gyro = robot.getDevice('gyro')
+    gyro.enable(timestep)
+    
+    #Created Motor instances
+    left_motor = robot.getDevice('Motor1')
+    left_motor.setPosition(float('inf'))
+    left_motor.setVelocity(0.0)
+    
+    right_motor = robot.getDevice('Motor2')    
+    right_motor.setPosition(float('inf'))
+    right_motor.setVelocity(0.0)
+    
+    #Create robot controller instance
+    control = dc.Robot_Controller(timestep)
+    kinematics = dc.Robot_Kinematics(timestep)
+  
+    #Initiative Variables
+    actual_state = np.array([0.0,0.0,0.0,0.0,0.0]) # State matrices need to change to a 5x1 matrix
+    error_state = np.array([0.0,0.0,0.0,0.0,0.0]) # State matrices need to change to a 5x1 matrix
+    encoder_state = np.array([0.0,0.0,0.0,0.0,0.0]) # State matrices need to change to a 5x1 matrix
+    desired_velocities = np.array([1.43,1])  # Velocity matrices need to change to a 2x1 matrix. Provided by the local planner (WP2 - Local Planner)  
+
+    # initialize variables for linear velocity calculation
+    prev_orientation = np.zeros(3)
+    velocity = np.zeros(3)
+    position = np.zeros(3)
+    prev_accel = np.zeros(3)
+    # Initialize Kalman filter state
+    prev_estimate = 0.0
+    prev_error = 1.0  
+        
+    i = 0
+      
+    vo = VisOdom.VisualOdom(left_camera)
+    
+    start7267,start2288,start2346,start6848,start6702 = gp.global_planner()
+    
+    # Main loop:
+    # - perform simulation steps until Webots is stopping the controller
+    while robot.step(timestep) != -1:
+
+        #Initialization of state based on current values
+        if i == 0:
+            orientation = imu.getRollPitchYaw()
+            position = gps.getValues()
+            speed = gps.getSpeed()
+            ang_vel = gyro.getValues()
+            actual_state[0] = position[0]
+            actual_state[1] = position[1]
+            actual_state[2] = orientation[2]
+            actual_state[3] = speed
+            actual_state[4] = ang_vel[2]
+            ps_values[0]=left_ps.getValue()
+            ps_values[1]=right_ps.getValue()
+            initial_encoder = ps_values
+            #print(initial_encoder)
+            i += 1
+
+        # Pulling Lidar point cloud information
+        range_image = lidar.getRangeImage()
+        
+        #Pulling camera information
+        left_camera.getImage()
+        right_camera.getImage()
+        orientation = imu.getRollPitchYaw()   
+        
+        #if len(vo.images) < 2:
+            #vo.loadImage(left_camera)
+        #else:
+            #q1,q2 = vo.matchMaker(left_camera)
+            #currentPose, vel, eul = vo.solvePose(q1,q2,currentPose)          
+            #print(currentPose, vel, eul)
+            
+        #Pulling GPS information
+        position = gps.getValues()
+        speed = gps.getSpeed()
+        
+        #Pulling gyro information
+        ang_vel = gyro.getValues()
+        
+        #Pulling encoder information
+        ps_values[0]=left_ps.getValue()
+        ps_values[1]=right_ps.getValue()
+        final_encoder = ps_values
+
+        #Checks - Print outputs
+        #print(final_encoder)
+        #print(orientation)
+        #print(position)
+        #print(speed)
+        #print(ang_vel)
+        #print(len(range_image))
+        
+        #Dynamics and Controls function
+        left_encoder_chg = final_encoder[0]-initial_encoder[0]
+        right_encoder_chg = final_encoder[1]-initial_encoder[1]
+        encoder_state = kinematics.encoder_state_estimate(actual_state,left_encoder_chg,right_encoder_chg)
+        actual_state, error_state, wheel_vel_ideal, wheel_vel_err = control.LQR(encoder_state,error_state,desired_velocities)
+        
+        #print(encoder_state)
+        #print(actual_state)
+
+        #Establishing Wheel speeds
+        left_speed = wheel_vel_ideal[0]
+        right_speed = wheel_vel_ideal[1]
+        
+        #Dharsh's Code - Staging Grounds
+        
+        #GPS Speed
+        #print(f"GPS velocity: {speed}")
+        
+        #Encoder Speed
+        vel_measurement = actual_state[3]
+
+        # Perform Kalman filtering - based on IMU
+        #estimate, error = sf.kalman_filter(prev_estimate, prev_error, vel_measurement)
+        estimate, error = sf.kalman_filter(encoder_state[3], error_state[3], desired_velocities[0])
+    
+        # Update Kalman filter state for next iteration
+        prev_estimate = estimate
+        prev_error = error
+        print(f"KF velocity: {estimate} - based on Encoder")
+        
+        #print(f"Obstacle Distance: {ultrasonic.getValue()}")
+        #left_speed = 0.5 * max_speed
+        #right_speed = 0.5 * max_speed
+        
+        left_motor.setVelocity(left_speed)
+        right_motor.setVelocity(right_speed)
+        
+    # Enter here exit cleanup code.
